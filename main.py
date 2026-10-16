@@ -1,50 +1,63 @@
-import os
+"""Command-line entry point for the conversational chatbot."""
+
+from collections.abc import Callable
+
 from dotenv import load_dotenv
-from google import genai
 
-# Load environment variables from .env file
-load_dotenv()
+from chatbot.cli import run_cli
+from chatbot.config import Provider, Settings, parse_provider
+from chatbot.conversation import Conversation
+from chatbot.errors import ConfigError, ProviderError
+from chatbot.providers import ProviderFactory
 
-# Get API key and model from environment variables
-API_KEY = os.environ.get("GEN_AI_API_KEY")
-MODEL_NAME = os.environ.get("GEN_AI_MODEL")
-
-if not API_KEY:
-    raise ValueError("GEN_AI_API_KEY is not set in the environment.")
-if not MODEL_NAME:
-    raise ValueError("GEN_AI_MODEL is not set in the environment.")
-
-client = genai.Client(api_key=API_KEY)
+_PROVIDER_PROMPT = (
+    "Choose a provider (google, openai, anthropic). Type 'quit' to exit: "
+)
 
 
-def _history_for_api(memory):
-    history = []
-    for turn in memory:
-        role = "model" if turn["role"] == "assistant" else "user"
-        history.append({"role": role, "parts": [{"text": turn["content"]}]})
-    return history
-
-
-def gen_ai_assistant(memory):
-    """Takes conversation history as memory and gets a response from the GenAI chat model."""
-    prior = memory[:-1]
-    user_message = memory[-1]["content"]
-    chat = client.chats.create(model=MODEL_NAME, history=_history_for_api(prior))
-    response = chat.send_message(user_message)
-    return response.text or ""
-
-def main():
-    memory = []
+def prompt_for_provider(
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> Provider | None:
+    """Ask until the user enters a Provider value or quits."""
     while True:
-        user_input = input("I am your AI Assistant. How can I help you today? (type 'quit' to exit) ")
-        if user_input.strip().lower() == "quit":
-            print("Goodbye!")
-            break
-        memory.append({"role": "user", "content": user_input})
-        response = gen_ai_assistant(memory)
-        memory.append({"role": "assistant", "content": response})
-        print("--------------------------------")
-        print(response)
+        try:
+            raw = input_fn(_PROVIDER_PROMPT)
+        except EOFError:
+            output_fn("Goodbye!")
+            return None
+        if raw.strip().lower() == "quit":
+            output_fn("Goodbye!")
+            return None
+        try:
+            return parse_provider(raw)
+        except ConfigError as exc:
+            output_fn(str(exc))
+
+
+def main(
+    input_fn: Callable[[str], str] = input,
+    output_fn: Callable[[str], None] = print,
+) -> None:
+    load_dotenv()
+    chosen = prompt_for_provider(input_fn, output_fn)
+    if chosen is None:
+        return
+    try:
+        settings = Settings.from_env(chosen)
+        provider = ProviderFactory.create(settings)
+    except ConfigError as exc:
+        output_fn(str(exc))
+        return
+    try:
+        run_cli(Conversation(), provider, input_fn=input_fn, output_fn=output_fn)
+    except ProviderError as exc:
+        output_fn(str(exc))
+
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print()
+        print("Goodbye!")
